@@ -1,0 +1,48 @@
+# CMake build files
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Compiled files
+*.o
+*.obj
+*.a
+*.so
+*.dll
+*.exe
+*.out
+
+# Debug and log files
+*.log
+core
+core.*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Environment and secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Runtime data
+*.mp4
+*.avi
+*.h264
+*.jpg
+*.png
