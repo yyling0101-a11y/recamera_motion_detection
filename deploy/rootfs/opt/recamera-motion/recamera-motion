@@ -1,0 +1,15 @@
+#!/bin/sh
+# Launcher for the reCamera region motion detector.
+#
+# The bundled libcvi_rtsp.so is the plain CVITEK build. The firmware copy in
+# /usr/local/lib/recamera-onvif is a vendor variant that always answers
+# DESCRIBE with 401 Digest auth, so it must not shadow ours.
+set -eu
+
+APP_DIR=/opt/recamera-motion
+
+export LD_LIBRARY_PATH="$APP_DIR/lib:/usr/local/lib/recamera-onvif:/mnt/system/usr/lib:/mnt/system/lib:/mnt/system/usr/lib/3rd${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export MOTION_CONFIG_PATH="${MOTION_CONFIG_PATH:-/userdata/motion_roi.json}"
+export MOTION_HTTP_PORT="${MOTION_HTTP_PORT:-8080}"
+
+exec "$APP_DIR/motion_detection" "$@"

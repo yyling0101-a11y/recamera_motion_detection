@@ -1,0 +1,80 @@
+#!/bin/sh
+
+### BEGIN INIT INFO
+# Provides:          recamera-motion
+# Required-Start:    $all
+# Required-Stop:     $all
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: reCamera region motion detection
+# Description:       Runs the ROI motion detector, RTSP stream and HTTP API.
+### END INIT INFO
+
+NAME=recamera-motion
+DESC="reCamera motion detection"
+DAEMON=/opt/recamera-motion/recamera-motion
+PIDFILE=/var/run/$NAME.pid
+LOGFILE=/var/log/$NAME.log
+
+# Only one process can own the camera pipeline. Stop the stock owners first;
+# sscma-supervisor is left alone because it is the app manager itself.
+stop_camera_owners() {
+    for service in /etc/init.d/[SK]92recamera-onvif /etc/init.d/[SK]91sscma-node; do
+        [ -x "$service" ] && "$service" stop >/dev/null 2>&1
+    done
+    return 0
+}
+
+start() {
+    echo "Starting $DESC: $NAME"
+    if [ -f "$PIDFILE" ]; then
+        PID=$(cat "$PIDFILE")
+        if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+            echo "$NAME is already running (PID: $PID)."
+            return 1
+        fi
+        echo "Removing stale PID file."
+        rm -f "$PIDFILE"
+    fi
+
+    stop_camera_owners
+    sleep 1
+    start-stop-daemon -S -q -m -b -p "$PIDFILE" -x /bin/sh -- -c "exec $DAEMON >>$LOGFILE 2>&1"
+    [ $? = 0 ] && echo "OK" || echo "FAIL"
+}
+
+stop() {
+    echo "Stopping $DESC: $NAME"
+    if [ -f "$PIDFILE" ]; then
+        start-stop-daemon -K -q -p "$PIDFILE"
+        rm -f "$PIDFILE"
+        # A hard kill can wedge the VPSS pipeline, so ask nicely first.
+        echo "OK"
+    else
+        echo "$NAME is not running."
+    fi
+}
+
+status() {
+    if [ -f "$PIDFILE" ]; then
+        PID=$(cat "$PIDFILE")
+        if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+            echo "$NAME is running (PID: $PID)."
+            return 0
+        fi
+        echo "$NAME PID file exists but the process is gone."
+        return 1
+    fi
+    echo "$NAME is not running."
+    return 3
+}
+
+case "$1" in
+    start)   start ;;
+    stop)    stop ;;
+    restart) stop; sleep 2; start ;;
+    status)  status ;;
+    *)       echo "Usage: $0 {start|stop|restart|status}"; exit 1 ;;
+esac
+
+exit 0

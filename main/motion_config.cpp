@@ -39,6 +39,12 @@ void validateConfig(const MotionConfig& c) {
     if (!(c.backgroundAlpha > 0.0 && c.backgroundAlpha <= 1.0)) throw std::runtime_error("background_alpha must be in (0, 1]");
     if (!(c.foregroundAlpha >= 0.0 && c.foregroundAlpha <= 1.0)) throw std::runtime_error("foreground_alpha must be in [0, 1]");
 
+    if (c.notify.enabled && c.notify.url.empty()) throw std::runtime_error("notify.url is required when notify is enabled");
+    if (!c.notify.url.empty() && c.notify.url.compare(0, 7, "http://") != 0) throw std::runtime_error("notify.url must start with http://");
+    if (c.notify.timeoutMs < 100 || c.notify.timeoutMs > 30000) throw std::runtime_error("notify.timeout_ms must be 100..30000");
+    if (c.notify.retries < 0 || c.notify.retries > 10) throw std::runtime_error("notify.retries must be 0..10");
+    if (c.notify.imageMaxBytes < 0 || c.notify.imageMaxBytes > 8 * 1024 * 1024) throw std::runtime_error("notify.image_max_bytes must be 0..8388608");
+
     for (const MotionZone& zone : c.zones) {
         if (zone.id.empty()) throw std::runtime_error("Every zone requires a non-empty id");
         if (zone.points.size() < 3) throw std::runtime_error("Zone " + zone.id + " requires at least 3 points");
@@ -59,6 +65,44 @@ MotionConfig defaultMotionConfig() {
     return config;
 }
 
+NotifyConfig parseNotifyConfig(const Value& root, const NotifyConfig& fallback) {
+    NotifyConfig notify = fallback;
+    if (!root.contains("notify"))
+        return notify;
+
+    const Value& block = root.at("notify");
+    if (!block.isObject())
+        throw std::runtime_error("notify must be an object");
+
+    notify.enabled      = readBool(block, "enabled", notify.enabled);
+    notify.url          = readString(block, "url", notify.url);
+    notify.deviceName   = readString(block, "device_name", notify.deviceName);
+    notify.includeImage = readBool(block, "include_image", notify.includeImage);
+    notify.imageMaxBytes = readInt(block, "image_max_bytes", notify.imageMaxBytes);
+    notify.timeoutMs    = readInt(block, "timeout_ms", notify.timeoutMs);
+    notify.retries      = readInt(block, "retries", notify.retries);
+
+    notify.events.clear();
+    if (block.contains("events")) {
+        const Value& events = block.at("events");
+        if (!events.isArray())
+            throw std::runtime_error("notify.events must be an array");
+        for (const Value& event : events.asArray()) {
+            notify.events.push_back(event.asString());
+        }
+    }
+    return notify;
+}
+
+bool notifyConfigHasBlock(const std::string& jsonText) {
+    try {
+        const Value root = mini_json::parse(jsonText);
+        return root.isObject() && root.contains("notify");
+    } catch (...) {
+        return false;
+    }
+}
+
 MotionConfig parseMotionConfig(const std::string& jsonText) {
     const Value root = mini_json::parse(jsonText);
     if (!root.isObject()) throw std::runtime_error("Motion config root must be a JSON object");
@@ -74,6 +118,8 @@ MotionConfig parseMotionConfig(const std::string& jsonText) {
     config.warmupFrames = readInt(root, "warmup_frames", config.warmupFrames);
     config.backgroundAlpha = readDouble(root, "background_alpha", config.backgroundAlpha);
     config.foregroundAlpha = readDouble(root, "foreground_alpha", config.foregroundAlpha);
+
+    config.notify = parseNotifyConfig(root, config.notify);
 
     if (root.contains("zones")) {
         const Value& zonesValue = root.at("zones");
@@ -142,6 +188,22 @@ std::string motionConfigToJson(const MotionConfig& config, int indent) {
         zones.pushBack(item);
     }
     root["zones"] = zones;
+
+    Value notify          = Value::object();
+    notify["enabled"]     = config.notify.enabled;
+    notify["url"]         = config.notify.url;
+    notify["device_name"] = config.notify.deviceName;
+    Value events          = Value::array();
+    for (const std::string& event : config.notify.events) {
+        events.pushBack(event);
+    }
+    notify["events"]          = events;
+    notify["include_image"]   = config.notify.includeImage;
+    notify["image_max_bytes"] = config.notify.imageMaxBytes;
+    notify["timeout_ms"]      = config.notify.timeoutMs;
+    notify["retries"]         = config.notify.retries;
+    root["notify"]            = notify;
+
     return root.dump(indent);
 }
 

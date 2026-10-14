@@ -2,7 +2,9 @@
 #include "mini_json.hpp"
 #include "motion_config.hpp"
 #include "motion_detector.hpp"
+#include "notifier.hpp"
 #include "rtsp_demo.h"
+#include "snapshot_store.hpp"
 
 #include <arpa/inet.h>
 #include <atomic>
@@ -15,6 +17,7 @@
 #include <signal.h>
 #include <string>
 #include <unistd.h>
+#include <vector>
 
 #include "frame_sync.hpp"
 
@@ -28,8 +31,9 @@ extern "C" {
 
 namespace {
 
-constexpr video_ch_index_t kMotionChannel = VIDEO_CH1;
-constexpr video_ch_index_t kRtspChannel   = VIDEO_CH2;
+constexpr video_ch_index_t kSnapshotChannel = VIDEO_CH0;
+constexpr video_ch_index_t kMotionChannel   = VIDEO_CH1;
+constexpr video_ch_index_t kRtspChannel     = VIDEO_CH2;
 constexpr int kMotionWidth                = 320;
 constexpr int kMotionHeight               = 180;
 constexpr int kMotionFps                  = 10;
@@ -39,6 +43,135 @@ constexpr int kRtspFps                    = 30;
 
 std::atomic<bool> gVideoStarted(false);
 std::atomic<bool> gRtspStarted(false);
+
+constexpr const char* kProgramVersion = "2.0.0";
+constexpr int kApiVersion             = 2;
+
+int gSnapshotWidth  = 1280;
+int gSnapshotHeight = 720;
+int gSnapshotFps    = 10;
+
+SnapshotStore gSnapshots(16);
+std::atomic<bool> gSnapshotChannelActive(false);
+
+int environmentInt(const char* name, int fallback) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || value[0] == '\0')
+        return fallback;
+    const int parsed = std::atoi(value);
+    return parsed > 0 ? parsed : fallback;
+}
+
+std::int64_t unixMsNow() {
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
+}
+
+std::string base64Encode(const std::uint8_t* data, std::size_t size) {
+    static const char* kAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve(((size + 2) / 3) * 4);
+    std::size_t index = 0;
+    while (index + 2 < size) {
+        const std::uint32_t triple = (static_cast<std::uint32_t>(data[index]) << 16) |
+                                     (static_cast<std::uint32_t>(data[index + 1]) << 8) |
+                                     static_cast<std::uint32_t>(data[index + 2]);
+        out.push_back(kAlphabet[(triple >> 18) & 0x3F]);
+        out.push_back(kAlphabet[(triple >> 12) & 0x3F]);
+        out.push_back(kAlphabet[(triple >> 6) & 0x3F]);
+        out.push_back(kAlphabet[triple & 0x3F]);
+        index += 3;
+    }
+    const std::size_t remaining = size - index;
+    if (remaining == 1) {
+        const std::uint32_t triple = static_cast<std::uint32_t>(data[index]) << 16;
+        out.push_back(kAlphabet[(triple >> 18) & 0x3F]);
+        out.push_back(kAlphabet[(triple >> 12) & 0x3F]);
+        out.push_back('=');
+        out.push_back('=');
+    } else if (remaining == 2) {
+        const std::uint32_t triple = (static_cast<std::uint32_t>(data[index]) << 16) |
+                                     (static_cast<std::uint32_t>(data[index + 1]) << 8);
+        out.push_back(kAlphabet[(triple >> 18) & 0x3F]);
+        out.push_back(kAlphabet[(triple >> 12) & 0x3F]);
+        out.push_back(kAlphabet[(triple >> 6) & 0x3F]);
+        out.push_back('=');
+    }
+    return out;
+}
+
+bool eventSelected(const NotifyConfig& notify, const std::string& type) {
+    if (notify.events.empty())
+        return true;
+    for (const std::string& wanted : notify.events) {
+        if (wanted == type || wanted == "*")
+            return true;
+    }
+    return false;
+}
+
+mini_json::Value normalizedBbox(const MotionEvent& event) {
+    if (!event.bboxValid || event.analysisWidth <= 0 || event.analysisHeight <= 0)
+        return mini_json::Value();
+    mini_json::Value bbox = mini_json::Value::array();
+    bbox.pushBack(static_cast<double>(event.bboxX) / event.analysisWidth);
+    bbox.pushBack(static_cast<double>(event.bboxY) / event.analysisHeight);
+    bbox.pushBack(static_cast<double>(event.bboxW) / event.analysisWidth);
+    bbox.pushBack(static_cast<double>(event.bboxH) / event.analysisHeight);
+    return bbox;
+}
+
+// Payload shared by the webhook push and the /api/events history so that both
+// consumers see exactly the same schema.
+mini_json::Value eventPayload(const MotionEvent& event, const std::string& deviceIp, int httpPort, const NotifyConfig& notify) {
+    const std::string apiBase = "http://" + deviceIp + ":" + std::to_string(httpPort);
+
+    mini_json::Value root       = mini_json::Value::object();
+    root["source"]              = "recamera_motion_detection";
+    root["schema"]              = kApiVersion;
+    root["program_version"]     = kProgramVersion;
+    root["event"]               = event.type;
+    root["event_id"]            = static_cast<double>(event.eventId);
+    root["device_name"]         = notify.deviceName;
+    root["device_ip"]           = deviceIp;
+    root["api_base"]            = apiBase;
+    root["snapshot_url"]        = apiBase + "/api/snapshot.jpg?event_id=" + std::to_string(event.eventId);
+    root["unix_ms"]             = static_cast<double>(event.unixMs);
+    root["capture_unix_ms"]     = static_cast<double>(event.captureUnixMs);
+    root["frame_id"]            = std::to_string(event.frameId);
+    root["motion_pixels"]       = event.motionPixels;
+    root["largest_blob_pixels"] = event.largestBlobPixels;
+    root["motion_ratio"]        = event.motionRatio;
+    root["analysis_width"]      = event.analysisWidth;
+    root["analysis_height"]     = event.analysisHeight;
+    root["bbox"]                = normalizedBbox(event);
+    return root;
+}
+
+int snapshotFrameCallback(void* data, void* args, void* userData) {
+    (void)args;
+    (void)userData;
+
+    VENC_STREAM_S* stream = static_cast<VENC_STREAM_S*>(data);
+    if (stream == nullptr || stream->pstPack == nullptr || stream->u32PackCount == 0)
+        return CVI_FAILURE;
+
+    std::vector<std::uint8_t> buffer;
+    for (CVI_U32 index = 0; index < stream->u32PackCount; ++index) {
+        VENC_PACK_S* pack = &stream->pstPack[index];
+        if (pack->pu8Addr == nullptr || pack->u32Offset > pack->u32Len)
+            return CVI_FAILURE;
+        const CVI_U8* begin = pack->pu8Addr + pack->u32Offset;
+        buffer.insert(buffer.end(), begin, begin + (pack->u32Len - pack->u32Offset));
+    }
+
+    if (buffer.size() < 4)
+        return CVI_SUCCESS;
+
+    static std::atomic<std::uint64_t> snapshotFrameId{0};
+    gSnapshots.push(buffer.data(), buffer.size(), ++snapshotFrameId, unixMsNow(), gSnapshotWidth, gSnapshotHeight);
+    return CVI_SUCCESS;
+}
 
 std::string jsonMessage(bool ok, const std::string& message) {
     mini_json::Value root = mini_json::Value::object();
@@ -203,6 +336,26 @@ int startVideoStack(MotionDetector& detector) {
         return result;
     }
 
+    if (gSnapshotFps > 0) {
+        video_ch_param_t snapshotParam{};
+        snapshotParam.format = VIDEO_FORMAT_JPEG;
+        snapshotParam.width  = static_cast<std::uint32_t>(gSnapshotWidth);
+        snapshotParam.height = static_cast<std::uint32_t>(gSnapshotHeight);
+        snapshotParam.fps    = static_cast<std::uint8_t>(gSnapshotFps);
+        result               = setupVideo(kSnapshotChannel, &snapshotParam);
+        if (result != 0) {
+            std::fprintf(stderr, "[video] setup snapshot channel failed: %d (continuing without snapshots)\n", result);
+        } else {
+            result = registerVideoFrameHandler(kSnapshotChannel, 0, snapshotFrameCallback, nullptr);
+            if (result != 0) {
+                std::fprintf(stderr, "[video] register snapshot callback failed: %d\n", result);
+            } else {
+                gSnapshotChannelActive.store(true);
+                std::printf("[video] snapshot channel %dx%d@%dfps ready\n", gSnapshotWidth, gSnapshotHeight, gSnapshotFps);
+            }
+        }
+    }
+
     video_ch_param_t rtspParam{};
     rtspParam.format = VIDEO_FORMAT_H264;
     rtspParam.width  = kRtspWidth;
@@ -267,6 +420,13 @@ int main() {
     const char* configEnvironment = std::getenv("MOTION_CONFIG_PATH");
     const std::string configPath  = configEnvironment != nullptr && configEnvironment[0] != '\0' ? configEnvironment : "/userdata/motion_roi.json";
 
+    gSnapshotWidth  = environmentInt("MOTION_SNAPSHOT_WIDTH", gSnapshotWidth);
+    gSnapshotHeight = environmentInt("MOTION_SNAPSHOT_HEIGHT", gSnapshotHeight);
+    gSnapshotFps    = environmentInt("MOTION_SNAPSHOT_FPS", gSnapshotFps);
+    const char* snapshotFpsEnvironment = std::getenv("MOTION_SNAPSHOT_FPS");
+    if (snapshotFpsEnvironment != nullptr && std::atoi(snapshotFpsEnvironment) == 0)
+        gSnapshotFps = 0;  // explicitly disabled
+
     int httpPort                = 8080;
     const char* portEnvironment = std::getenv("MOTION_HTTP_PORT");
     if (portEnvironment != nullptr && portEnvironment[0] != '\0') {
@@ -286,15 +446,53 @@ int main() {
     MotionDetector detector(kMotionWidth, kMotionHeight);
     detector.setConfig(config);
 
+    WebhookNotifier notifier;
+    notifier.configure(config.notify);
+
     const int videoResult = startVideoStack(detector);
     if (videoResult != 0)
         return EXIT_FAILURE;
 
-    const std::string ip = getLocalIp();
+    const std::string ip          = getLocalIp();
+    const std::string rtspUrl     = "rtsp://" + ip + ":8554/live0";
+    const std::string apiBase     = "http://" + ip + ":" + std::to_string(httpPort);
+
+    // Motion transitions are pushed to the configured webhook from the
+    // notifier thread; the video callback only builds the payload.
+    detector.setEventCallback([&](const MotionEvent& event) {
+        const NotifyConfig notify = notifier.config();
+        if (!notify.enabled || notify.url.empty() || !eventSelected(notify, event.type))
+            return;
+
+        mini_json::Value payload = eventPayload(event, ip, httpPort, notify);
+
+        JpegSnapshot snapshot;
+        if (notify.includeImage && gSnapshots.atOrBefore(event.captureUnixMs, snapshot) &&
+            !snapshot.data.empty() && static_cast<int>(snapshot.data.size()) <= notify.imageMaxBytes) {
+            mini_json::Value image      = mini_json::Value::object();
+            image["encoding"]           = "base64";
+            image["content_type"]       = "image/jpeg";
+            image["width"]              = snapshot.width;
+            image["height"]             = snapshot.height;
+            image["capture_unix_ms"]    = static_cast<double>(snapshot.captureUnixMs);
+            image["bytes"]              = static_cast<double>(snapshot.data.size());
+            image["data"]               = base64Encode(snapshot.data.data(), snapshot.data.size());
+            payload["image"]            = image;
+        }
+
+        notifier.enqueue(payload.dump(), event.type + " event=" + std::to_string(event.eventId));
+    });
+
     std::printf("\nreCamera motion detector is running\n");
-    std::printf("RTSP: rtsp://%s:8554/onvif\n", ip.c_str());
-    std::printf("API : http://%s:%d/api/status\n", ip.c_str(), httpPort);
-    std::printf("Config file: %s\n\n", configPath.c_str());
+    std::printf("RTSP: %s\n", rtspUrl.c_str());
+    std::printf("API : %s/api/status\n", apiBase.c_str());
+    std::printf("Config file: %s\n", configPath.c_str());
+    if (config.notify.enabled && !config.notify.url.empty()) {
+        std::printf("Notify: %s\n", config.notify.url.c_str());
+    } else {
+        std::printf("Notify: disabled (POST /api/config with a notify block to enable)\n");
+    }
+    std::printf("\n");
     std::fflush(stdout);
 
     HttpServer server(httpPort);
@@ -306,10 +504,17 @@ int main() {
             response.body =
                 "reCamera Motion Detection\n"
                 "GET  /api/health\n"
+                "GET  /api/version\n"
                 "GET  /api/status\n"
                 "GET  /api/config\n"
                 "POST /api/config\n"
-                "POST /api/background/reset\n";
+                "POST /api/background/reset\n"
+                "GET  /api/snapshot.jpg[?event_id=N|?at=UNIX_MS]\n"
+                "GET  /api/events[?after_id=N&limit=N]\n"
+                "GET  /api/frames[?after_frame_id=N&limit=N]\n"
+                "GET  /api/notify\n"
+                "POST /api/notify\n"
+                "POST /api/notify/test\n";
             return response;
         }
 
@@ -317,11 +522,40 @@ int main() {
             mini_json::Value root   = mini_json::Value::object();
             root["ok"]              = true;
             root["device_ip"]       = ip;
-            root["rtsp_url"]        = "rtsp://" + ip + ":8554/onvif";
+            root["rtsp_url"]        = rtspUrl;
+            root["api_base"]        = apiBase;
             root["analysis_width"]  = kMotionWidth;
             root["analysis_height"] = kMotionHeight;
             root["analysis_fps"]    = kMotionFps;
-            response.body           = root.dump(2);
+
+            mini_json::Value snapshot      = mini_json::Value::object();
+            snapshot["enabled"]            = gSnapshotChannelActive.load();
+            snapshot["width"]              = gSnapshotWidth;
+            snapshot["height"]             = gSnapshotHeight;
+            snapshot["fps"]                = gSnapshotFps;
+            snapshot["buffered_frames"]    = static_cast<double>(gSnapshots.size());
+            snapshot["published_frames"]   = static_cast<double>(gSnapshots.publishedCount());
+            snapshot["url"]                = apiBase + "/api/snapshot.jpg";
+            root["snapshot"]               = snapshot;
+
+            const NotifyConfig notify = notifier.config();
+            mini_json::Value notifyJson  = mini_json::Value::object();
+            notifyJson["enabled"]        = notify.enabled;
+            notifyJson["url_configured"] = !notify.url.empty();
+            root["notify"]               = notifyJson;
+            response.body                = root.dump(2);
+            return response;
+        }
+
+        if (request.method == "GET" && request.path == "/api/version") {
+            mini_json::Value root = mini_json::Value::object();
+            root["ok"]            = true;
+            root["program"]       = "recamera_motion_detection";
+            root["version"]       = kProgramVersion;
+            root["api"]           = kApiVersion;
+            root["device_ip"]     = ip;
+            root["rtsp_url"]      = rtspUrl;
+            response.body         = root.dump(2);
             return response;
         }
 
@@ -337,7 +571,12 @@ int main() {
 
         if (request.method == "POST" && request.path == "/api/config") {
             try {
-                const MotionConfig newConfig = parseMotionConfig(request.body);
+                MotionConfig newConfig = parseMotionConfig(request.body);
+                // A zone-only upload (for example from the legacy Windows UI)
+                // must not silently disable event pushing.
+                if (!notifyConfigHasBlock(request.body)) {
+                    newConfig.notify = detector.getConfig().notify;
+                }
                 std::string saveError;
                 if (!saveMotionConfigFile(configPath, newConfig, saveError)) {
                     response.status = 500;
@@ -345,6 +584,7 @@ int main() {
                     return response;
                 }
                 detector.setConfig(newConfig);
+                notifier.configure(newConfig.notify);
                 response.body = motionConfigToJson(newConfig, 2);
                 return response;
             } catch (const std::exception& e) {
@@ -357,6 +597,158 @@ int main() {
         if (request.method == "POST" && request.path == "/api/background/reset") {
             detector.resetBackground();
             response.body = jsonMessage(true, "background reset");
+            return response;
+        }
+
+        if (request.method == "GET" && request.path == "/api/snapshot.jpg") {
+            if (!gSnapshotChannelActive.load()) {
+                response.status = 503;
+                response.body   = jsonMessage(false, "snapshot channel disabled (set MOTION_SNAPSHOT_FPS>0)");
+                return response;
+            }
+
+            const std::string eventIdText = httpQueryParam(request.query, "event_id");
+            const std::string atText      = httpQueryParam(request.query, "at");
+
+            JpegSnapshot snapshot;
+            bool found = false;
+            if (!eventIdText.empty()) {
+                const std::uint64_t eventId = std::strtoull(eventIdText.c_str(), nullptr, 10);
+                for (const MotionEvent& event : detector.recentEvents(0, 0)) {
+                    if (event.eventId == eventId) {
+                        found = gSnapshots.atOrBefore(event.captureUnixMs, snapshot);
+                        break;
+                    }
+                }
+                if (!found) {
+                    response.status = 404;
+                    response.body   = jsonMessage(false, "no buffered snapshot for event_id " + eventIdText);
+                    return response;
+                }
+            } else if (!atText.empty()) {
+                found = gSnapshots.atOrBefore(static_cast<std::int64_t>(std::strtoll(atText.c_str(), nullptr, 10)), snapshot);
+            } else {
+                found = gSnapshots.latest(snapshot);
+            }
+
+            if (!found || snapshot.data.empty()) {
+                response.status = 404;
+                response.body   = jsonMessage(false, "no snapshot available yet");
+                return response;
+            }
+
+            response.contentType = "image/jpeg";
+            response.body.assign(reinterpret_cast<const char*>(snapshot.data.data()), snapshot.data.size());
+            return response;
+        }
+
+        if (request.method == "GET" && request.path == "/api/events") {
+            const std::string afterText = httpQueryParam(request.query, "after_id");
+            const std::string limitText = httpQueryParam(request.query, "limit");
+            const std::uint64_t afterId = afterText.empty() ? 0 : std::strtoull(afterText.c_str(), nullptr, 10);
+            const std::size_t limit     = limitText.empty() ? 50 : static_cast<std::size_t>(std::strtoul(limitText.c_str(), nullptr, 10));
+            response.body               = detector.eventsJson(afterId, limit);
+            return response;
+        }
+
+        if (request.method == "GET" && request.path == "/api/frames") {
+            const std::string afterText = httpQueryParam(request.query, "after_frame_id");
+            const std::string limitText = httpQueryParam(request.query, "limit");
+            const std::uint64_t afterId = afterText.empty() ? 0 : std::strtoull(afterText.c_str(), nullptr, 10);
+            const std::size_t limit     = limitText.empty() ? 100 : static_cast<std::size_t>(std::strtoul(limitText.c_str(), nullptr, 10));
+            response.body               = detector.recentFramesJson(afterId, limit);
+            return response;
+        }
+
+        if (request.path == "/api/notify" || request.path == "/api/notify/test") {
+            NotifyConfig notify = notifier.config();
+
+            if (request.method == "POST" && request.path == "/api/notify") {
+                try {
+                    const mini_json::Value root = mini_json::parse(request.body);
+                    if (!root.isObject())
+                        throw std::runtime_error("notify payload must be a JSON object");
+                    notify = parseNotifyConfig(root, notify);
+
+                    MotionConfig stored = detector.getConfig();
+                    stored.notify       = notify;
+                    std::string saveError;
+                    if (!saveMotionConfigFile(configPath, stored, saveError)) {
+                        response.status = 500;
+                        response.body   = jsonMessage(false, saveError);
+                        return response;
+                    }
+                    // Update the push target without rebuilding the background
+                    // model, so an already warmed detector keeps running.
+                    detector.setNotify(notify);
+                    notifier.configure(notify);
+                } catch (const std::exception& e) {
+                    response.status = 400;
+                    response.body   = jsonMessage(false, e.what());
+                    return response;
+                }
+            } else if (request.method != "GET" && request.method != "POST") {
+                response.status = 405;
+                response.body   = jsonMessage(false, "use GET or POST");
+                return response;
+            }
+
+            if (request.path == "/api/notify/test") {
+                if (!notify.enabled || notify.url.empty()) {
+                    response.status = 400;
+                    response.body   = jsonMessage(false, "notify is not configured");
+                    return response;
+                }
+                MotionEvent event;
+                detector.lastEvent(event);
+                event.type            = "test";
+                event.unixMs          = unixMsNow();
+                event.captureUnixMs   = event.unixMs;
+                mini_json::Value payload = eventPayload(event, ip, httpPort, notify);
+                JpegSnapshot snapshot;
+                if (gSnapshots.latest(snapshot) && static_cast<int>(snapshot.data.size()) <= notify.imageMaxBytes) {
+                    mini_json::Value image   = mini_json::Value::object();
+                    image["encoding"]        = "base64";
+                    image["content_type"]    = "image/jpeg";
+                    image["width"]           = snapshot.width;
+                    image["height"]          = snapshot.height;
+                    image["capture_unix_ms"] = static_cast<double>(snapshot.captureUnixMs);
+                    image["bytes"]           = static_cast<double>(snapshot.data.size());
+                    image["data"]            = base64Encode(snapshot.data.data(), snapshot.data.size());
+                    payload["image"]         = image;
+                }
+                const bool queued = notifier.enqueue(payload.dump(), "test");
+                response.status   = queued ? 200 : 503;
+                response.body     = jsonMessage(queued, queued ? "test notification queued" : "notification queue unavailable");
+                return response;
+            }
+
+            const NotifierStats stats = notifier.stats();
+            mini_json::Value root     = mini_json::Value::object();
+            root["enabled"]           = notify.enabled;
+            root["url"]               = notify.url;
+            root["device_name"]       = notify.deviceName;
+            mini_json::Value events   = mini_json::Value::array();
+            for (const std::string& event : notify.events) {
+                events.pushBack(event);
+            }
+            root["events"]            = events;
+            root["include_image"]     = notify.includeImage;
+            root["image_max_bytes"]   = notify.imageMaxBytes;
+            root["timeout_ms"]        = notify.timeoutMs;
+            root["retries"]           = notify.retries;
+
+            mini_json::Value statsJson        = mini_json::Value::object();
+            statsJson["queued"]               = static_cast<double>(stats.queued);
+            statsJson["sent"]                 = static_cast<double>(stats.sent);
+            statsJson["failed"]               = static_cast<double>(stats.failed);
+            statsJson["dropped"]              = static_cast<double>(stats.dropped);
+            statsJson["last_attempt_unix_ms"] = static_cast<double>(stats.lastAttemptUnixMs);
+            statsJson["last_success_unix_ms"] = static_cast<double>(stats.lastSuccessUnixMs);
+            statsJson["last_http_status"]     = stats.lastHttpStatus;
+            statsJson["last_error"]           = stats.lastError;
+            root["stats"]                     = statsJson;
+            response.body                     = root.dump(2);
             return response;
         }
 

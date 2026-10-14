@@ -8,6 +8,7 @@ component_register(
     ${CMAKE_CURRENT_LIST_DIR}/http_server.cpp
     ${CMAKE_CURRENT_LIST_DIR}/motion_config.cpp
     ${CMAKE_CURRENT_LIST_DIR}/motion_detector.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/notifier.cpp
     ${CMAKE_CURRENT_LIST_DIR}/rtsp_demo.cpp
     ${CMAKE_CURRENT_LIST_DIR}/frame_sei.cpp
     ${CMAKE_CURRENT_LIST_DIR}/frame_sync.cpp

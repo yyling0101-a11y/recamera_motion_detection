@@ -6,8 +6,12 @@
 struct HttpRequest {
     std::string method;
     std::string path;
+    std::string query;
     std::string body;
 };
+
+// Returns the raw (still percent-encoded) value of a query parameter.
+std::string httpQueryParam(const std::string& query, const std::string& key);
 
 struct HttpResponse {
     int status = 200;
@@ -24,6 +28,10 @@ public:
     void start();
 
 private:
+    // Each connection is served on its own thread: a slow client (or a long
+    // MJPEG/snapshot download) must not stall the control API.
+    void handleClient(int client);
+
     int port_;
     Handler handler_;
 };

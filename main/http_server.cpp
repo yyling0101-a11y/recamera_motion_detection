@@ -9,7 +9,23 @@
 #include <netinet/in.h>
 #include <sstream>
 #include <sys/socket.h>
+#include <thread>
 #include <unistd.h>
+
+std::string httpQueryParam(const std::string& query, const std::string& key) {
+    std::size_t offset = 0;
+    while (offset <= query.size()) {
+        const std::size_t amp = query.find('&', offset);
+        const std::string pair = query.substr(offset, amp == std::string::npos ? std::string::npos : amp - offset);
+        const std::size_t equals = pair.find('=');
+        if (equals != std::string::npos && pair.compare(0, equals, key) == 0)
+            return pair.substr(equals + 1);
+        if (amp == std::string::npos)
+            break;
+        offset = amp + 1;
+    }
+    return std::string();
+}
 
 namespace {
 
@@ -26,18 +42,23 @@ std::string reasonPhrase(int status) {
     }
 }
 
-std::string trimQuery(const std::string& path) {
+std::string trimQuery(const std::string& path, std::string& query) {
     const std::size_t pos = path.find('?');
-    return pos == std::string::npos ? path : path.substr(0, pos);
+    if (pos == std::string::npos) {
+        query.clear();
+        return path;
+    }
+    query = path.substr(pos + 1);
+    return path.substr(0, pos);
 }
 
-bool parseRequestLine(const std::string& request, std::string& method, std::string& path) {
+bool parseRequestLine(const std::string& request, std::string& method, std::string& path, std::string& query) {
     const std::size_t lineEnd = request.find("\r\n");
     if (lineEnd == std::string::npos) return false;
     std::istringstream line(request.substr(0, lineEnd));
     std::string version;
     if (!(line >> method >> path >> version)) return false;
-    path = trimQuery(path);
+    path = trimQuery(path, query);
     return version.find("HTTP/") == 0;
 }
 
@@ -181,42 +202,46 @@ void HttpServer::start() {
             continue;
         }
 
-        std::string rawRequest;
-        bool tooLarge = false;
-        if (!readHttpRequest(client, rawRequest, tooLarge)) {
-            const HttpResponse response = jsonError(tooLarge ? 413 : 400, tooLarge ? "request too large" : "invalid request");
-            writeAll(client, buildResponse(response));
-            close(client);
-            continue;
-        }
+        std::thread([this, client] { handleClient(client); }).detach();
+    }
+}
 
-        HttpRequest request;
-        if (!parseRequestLine(rawRequest, request.method, request.path)) {
-            writeAll(client, buildResponse(jsonError(400, "invalid request line")));
-            close(client);
-            continue;
-        }
-
-        const std::size_t bodyPos = rawRequest.find("\r\n\r\n");
-        request.body = bodyPos == std::string::npos ? std::string() : rawRequest.substr(bodyPos + 4);
-
-        HttpResponse response;
-        if (request.method == "OPTIONS") {
-            response.status = 204;
-            response.body.clear();
-        } else if (handler_) {
-            try {
-                response = handler_(request);
-            } catch (const std::exception& e) {
-                response = jsonError(500, e.what());
-            } catch (...) {
-                response = jsonError(500, "unknown server error");
-            }
-        } else {
-            response = jsonError(500, "no HTTP handler installed");
-        }
-
+void HttpServer::handleClient(int client) {
+    std::string rawRequest;
+    bool tooLarge = false;
+    if (!readHttpRequest(client, rawRequest, tooLarge)) {
+        const HttpResponse response = jsonError(tooLarge ? 413 : 400, tooLarge ? "request too large" : "invalid request");
         writeAll(client, buildResponse(response));
         close(client);
+        return;
     }
+
+    HttpRequest request;
+    if (!parseRequestLine(rawRequest, request.method, request.path, request.query)) {
+        writeAll(client, buildResponse(jsonError(400, "invalid request line")));
+        close(client);
+        return;
+    }
+
+    const std::size_t bodyPos = rawRequest.find("\r\n\r\n");
+    request.body = bodyPos == std::string::npos ? std::string() : rawRequest.substr(bodyPos + 4);
+
+    HttpResponse response;
+    if (request.method == "OPTIONS") {
+        response.status = 204;
+        response.body.clear();
+    } else if (handler_) {
+        try {
+            response = handler_(request);
+        } catch (const std::exception& e) {
+            response = jsonError(500, e.what());
+        } catch (...) {
+            response = jsonError(500, "unknown server error");
+        }
+    } else {
+        response = jsonError(500, "no HTTP handler installed");
+    }
+
+    writeAll(client, buildResponse(response));
+    close(client);
 }
