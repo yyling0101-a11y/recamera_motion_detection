@@ -1,0 +1,7 @@
+{
+  "id": "region_motion",
+  "name": "选区运动检测",
+  "description": "在画面上绘制检测区域，检测到运动时向 Home Assistant 告警并抓拍。",
+  "version": "1.0.0",
+  "source": "recamera_motion_detection"
+}
