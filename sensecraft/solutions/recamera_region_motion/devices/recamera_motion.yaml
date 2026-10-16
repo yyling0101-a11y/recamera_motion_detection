@@ -20,11 +20,11 @@ ssh:
 
 binary:
   deb_package:
-    path: https://github.com/yyling0101-a11y/recamera_motion_detection/releases/download/v2.1.1/recamera-motion_2.1.1_riscv64.deb
+    path: https://github.com/yyling0101-a11y/recamera_motion_detection/releases/download/v2.1.2/recamera-motion_2.1.2_riscv64.deb
     name: recamera-motion
     includes_init_script: true
     checksum:
-      sha256: 9e509943841477fd3dca7d7c65459ea21cd32984f0adb23e84b2eeb873b1ae2f
+      sha256: 3dab55239994156f315557676b1957200378b2e44ef4d10e26ce59711f98428b
   service_name: recamera-motion
   service_priority: 92
   auto_start: true

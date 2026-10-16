@@ -5,7 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
-constexpr const char* kProgramVersion = "2.1.1";
+constexpr const char* kProgramVersion = "2.1.2";
 constexpr int kApiVersion = 2;
 std::int64_t unixMsNow();
 std::string base64Encode(const std::uint8_t* data, std::size_t size);

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="${VERSION:-2.1.1}"
+VERSION="${VERSION:-2.1.2}"
 BUILD_DIR="${BUILD_DIR:-${HOME}/work/sscma-example-sg200x/solutions/motion_detection/build}"
 SG200X_SDK_PATH="${SG200X_SDK_PATH:-${HOME}/work/sdk_dl/sg2002_recamera_emmc}"
 RTSP_LIB="${RTSP_LIB:-${SG200X_SDK_PATH}/cvi_rtsp/install/lib/libcvi_rtsp.so}"
@@ -43,5 +43,5 @@ EOF
 chmod 0755 "$ROOT/DEBIAN/postinst"
 
 mkdir -p "$OUTPUT_DIR"
-dpkg-deb --build --root-owner-group "$ROOT" "$OUTPUT_DIR/${PACKAGE}_${VERSION}_${ARCH}.deb"
+dpkg-deb --build --root-owner-group -Zgzip -z6 "$ROOT" "$OUTPUT_DIR/${PACKAGE}_${VERSION}_${ARCH}.deb"
 sha256sum "$OUTPUT_DIR/${PACKAGE}_${VERSION}_${ARCH}.deb"

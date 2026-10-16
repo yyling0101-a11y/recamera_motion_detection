@@ -3,7 +3,7 @@
   "source": "recamera_motion_detection",
   "name": {"zh": "选区运动检测", "en": "Region motion detection"},
   "description": {"zh": "绘制检测和忽略区域，在运动发生时向 Home Assistant 发送事件与抓拍。", "en": "Draw detection and exclusion zones, then send motion events and snapshots to Home Assistant."},
-  "version": "2.1.1",
+  "version": "2.1.2",
   "have_recamera_panel": true,
   "connections": {
     "rtsp": {"enabled": true, "port": 8554, "path": "/live0"},
