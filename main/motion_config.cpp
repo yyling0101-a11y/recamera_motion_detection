@@ -45,6 +45,19 @@ void validateConfig(const MotionConfig& c) {
     if (c.notify.retries < 0 || c.notify.retries > 10) throw std::runtime_error("notify.retries must be 0..10");
     if (c.notify.imageMaxBytes < 0 || c.notify.imageMaxBytes > 8 * 1024 * 1024) throw std::runtime_error("notify.image_max_bytes must be 0..8388608");
 
+    if (c.rtsp.port < 1 || c.rtsp.port > 65535) throw std::runtime_error("rtsp.port must be 1..65535");
+    if (c.rtsp.path.size() < 2 || c.rtsp.path.size() > 64 || c.rtsp.path[0] != '/') throw std::runtime_error("rtsp.path must be a slash-prefixed single path segment of at most 63 characters");
+    for (std::size_t i = 1; i < c.rtsp.path.size(); ++i) {
+        const unsigned char ch = static_cast<unsigned char>(c.rtsp.path[i]);
+        const bool asciiLetterOrDigit = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9');
+        if (!(asciiLetterOrDigit || ch == '-' || ch == '_'))
+            throw std::runtime_error("rtsp.path may contain only letters, digits, '-' and '_'");
+    }
+
+    // This build has no MQTT client. Reject an attempted enable explicitly
+    // instead of accepting a setting that would silently do nothing.
+    // MQTT settings are intentionally not part of the v1 runtime schema yet.
+
     for (const MotionZone& zone : c.zones) {
         if (zone.id.empty()) throw std::runtime_error("Every zone requires a non-empty id");
         if (zone.points.size() < 3) throw std::runtime_error("Zone " + zone.id + " requires at least 3 points");
@@ -94,6 +107,15 @@ NotifyConfig parseNotifyConfig(const Value& root, const NotifyConfig& fallback) 
     return notify;
 }
 
+bool rtspConfigHasBlock(const std::string& jsonText) {
+    try {
+        const Value root = mini_json::parse(jsonText);
+        return root.isObject() && root.contains("rtsp");
+    } catch (...) {
+        return false;
+    }
+}
+
 bool notifyConfigHasBlock(const std::string& jsonText) {
     try {
         const Value root = mini_json::parse(jsonText);
@@ -120,6 +142,18 @@ MotionConfig parseMotionConfig(const std::string& jsonText) {
     config.foregroundAlpha = readDouble(root, "foreground_alpha", config.foregroundAlpha);
 
     config.notify = parseNotifyConfig(root, config.notify);
+
+    if (root.contains("rtsp")) {
+        const Value& block = root.at("rtsp");
+        if (!block.isObject())
+            throw std::runtime_error("rtsp must be an object");
+        config.rtsp.enabled = readBool(block, "enabled", config.rtsp.enabled);
+        config.rtsp.port = readInt(block, "port", config.rtsp.port);
+        config.rtsp.path = readString(block, "path", config.rtsp.path);
+    }
+    if (root.contains("mqtt")) {
+        throw std::runtime_error("mqtt is not supported by this build; use notify for Home Assistant webhook delivery");
+    }
 
     if (root.contains("zones")) {
         const Value& zonesValue = root.at("zones");
@@ -170,6 +204,12 @@ std::string motionConfigToJson(const MotionConfig& config, int indent) {
     root["warmup_frames"] = config.warmupFrames;
     root["background_alpha"] = config.backgroundAlpha;
     root["foreground_alpha"] = config.foregroundAlpha;
+
+    Value rtsp = Value::object();
+    rtsp["enabled"] = config.rtsp.enabled;
+    rtsp["port"] = config.rtsp.port;
+    rtsp["path"] = config.rtsp.path;
+    root["rtsp"] = rtsp;
 
     Value zones = Value::array();
     for (const MotionZone& zone : config.zones) {

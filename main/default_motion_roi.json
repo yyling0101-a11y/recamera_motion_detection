@@ -9,5 +9,10 @@
   "warmup_frames": 20,
   "background_alpha": 0.04,
   "foreground_alpha": 0.002,
-  "zones": []
+  "zones": [],
+  "rtsp": {
+    "enabled": true,
+    "port": 8554,
+    "path": "/live0"
+  }
 }

@@ -26,7 +26,7 @@ typedef struct APP_PARAM_RTSP_S {
     pthread_mutex_t mutex;
 } APP_PARAM_RTSP_T;
 
-int initRtsp(uint8_t channelEnableMask);
+int initRtsp(uint8_t channelEnableMask, int port, const char* path);
 int deinitRtsp(void);
 int fpStreamingSendToRtsp(void* pData, void* pArgs, void* pUserData);
 int requestRtspIdr(void);

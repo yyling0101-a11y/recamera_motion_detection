@@ -36,6 +36,14 @@ struct NotifyConfig {
     int retries           = 2;
 };
 
+// RTSP listener settings are read when the video pipeline starts. Changes made
+// through the HTTP API are persisted immediately and take effect after restart.
+struct RtspConfig {
+    bool enabled = true;
+    int port = 8554;
+    std::string path = "/live0";
+};
+
 struct MotionConfig {
     int version = 1;
     bool enabled = true;
@@ -53,6 +61,7 @@ struct MotionConfig {
     std::vector<MotionZone> zones;
 
     NotifyConfig notify;
+    RtspConfig rtsp;
 };
 
 MotionConfig defaultMotionConfig();
@@ -64,4 +73,5 @@ bool loadMotionConfigFile(const std::string& path, MotionConfig& config, std::st
 // a zone-only configuration.
 NotifyConfig parseNotifyConfig(const mini_json::Value& root, const NotifyConfig& fallback);
 bool notifyConfigHasBlock(const std::string& jsonText);
+bool rtspConfigHasBlock(const std::string& jsonText);
 bool saveMotionConfigFile(const std::string& path, const MotionConfig& config, std::string& error);

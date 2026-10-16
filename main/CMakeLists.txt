@@ -4,6 +4,9 @@ component_register(
     COMPONENT_NAME main
 
     SRCS
+    ${CMAKE_CURRENT_LIST_DIR}/video_stack.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/app_api.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/event_payload.cpp
     ${CMAKE_CURRENT_LIST_DIR}/main.cpp
     ${CMAKE_CURRENT_LIST_DIR}/http_server.cpp
     ${CMAKE_CURRENT_LIST_DIR}/motion_config.cpp

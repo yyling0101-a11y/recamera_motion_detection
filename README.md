@@ -1,255 +1,86 @@
 # reCamera Motion Detection (SG200X)
 
-A lightweight motion detection system for the Seeed reCamera (SG200X) platform: RTSP
-video output, frame synchronisation, SEI metadata, ROI region detection, JPEG snapshot
-buffering, webhook event push and an HTTP control interface.
+Motion detection for the Seeed reCamera SG200X. The device analyzes selected regions of a 320×180 luma frame, serves live status and JPEG snapshots over HTTP, can publish an H.264 RTSP stream, and sends motion events to a webhook. No OpenCV or NPU is required for detection.
 
-Regions are drawn and alerts are consumed by the
-[reCamera Home Assistant integration](https://github.com/yyling0101-a11y/recamera-ha);
-the bundled `windows_ui` Tk client works against the same API.
+The [reCamera Home Assistant integration](https://github.com/yyling0101-a11y/recamera-ha) provides region editing, live view, and notifications. An optional PySide6 desktop editor is included in `windows_ui/`. For Chinese instructions, see [README - CH.md](README%20-%20CH.md).
 
-Suitable for embedded security, industrial inspection, edge video analytics and similar
-scenarios.
+## Quick start
 
----
+The build uses the SG200X SDK and a RISC-V musl cross compiler. With the paths in the table below available:
 
-## I. System Features
-
-- 🎥 RTSP Real-time Video Stream Output (rtsp_demo)
-- 🧠 Lightweight Motion Detection (motion_detector)
-- 📐 Multi-ROI Region Management (roi_manager)
-- 📡 HTTP API Control Interface (http_server)
-- 📸 JPEG Snapshot Ring Buffer (snapshot_store)
-- 🔔 Webhook Event Push with attached frame (notifier)
-- ⏱ Frame Synchronization Mechanism (frame_sync)
-- 🧾 SEI Metadata Encapsulation (frame_sei)
-- ⚙ JSON Configuration System (motion_config)
-- 🧩 Single-Header JSON Parsing (mini_json)
-- 🐳 One-command cross build and OTA deploy (`scripts/build.sh`, `scripts/deploy.sh`)
-
-Regions are edited and alerts are consumed by the
-[reCamera Home Assistant integration](https://github.com/yyling0101-a11y/recamera-ha);
-the bundled `windows_ui` client still works against the same HTTP API.
-
----
-
-## II. Project Structure
-
-```text
-.
-├── CMakeLists.txt
-├── README.md
-├── README - CH.md
-├── deploy/
-│   └── rootfs/
-│       ├── etc/init.d/S96recamera-motion        # Boot service
-│       └── opt/recamera-motion/recamera-motion  # Launcher (env, LD_LIBRARY_PATH)
-├── scripts/
-│   ├── build.sh                                 # Cross compile for riscv64 musl
-│   └── deploy.sh                                # Install / update / uninstall over SSH
-├── main/
-│   ├── main.cpp                  # Program entry point
-│   ├── motion_detector.*         # Motion detection core + event callback
-│   ├── motion_config.*           # Configuration (zones, sensitivity, notify)
-│   ├── snapshot_store.hpp        # JPEG ring buffer holding event frames
-│   ├── notifier.*                # Webhook push worker (retry + base64 image)
-│   ├── http_server.*             # HTTP control interface (threaded, CORS)
-│   ├── roi_manager.h             # ROI management (polygon regions)
-│   ├── roi.h                     # ROI data structure definition
-│   ├── frame_sync.*              # Multi-frame synchronization logic
-│   ├── frame_sei.*               # SEI metadata encapsulation
-│   ├── rtsp_demo.*               # RTSP streaming module
-│   ├── mini_json.hpp             # Lightweight JSON parsing
-│   └── default_motion_roi.json   # Default ROI configuration
-└── windows_ui/                   # Optional Tk desktop client
-    ├── README.md
-    ├── api_client.py
-    ├── app.py
-    ├── requirements.txt
-    ├── run_windows.bat
-    ├── sample_config.json
-    ├── status_poller.py
-    ├── video_canvas.py
-    └── video_worker.py
+```bash
+./scripts/build.sh
+./scripts/deploy.sh                          # installs to root@192.168.42.1 and restarts the service
+curl http://192.168.42.1:8080/api/health
+ffprobe rtsp://192.168.42.1:8554/live0
 ```
 
----
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `SSCMA_EXAMPLE_PATH` | `$HOME/work/sscma-example-sg200x` | CMake build framework and components |
+| `SG200X_SDK_PATH` | `$HOME/work/sdk_dl/sg2002_recamera_emmc` | Device SDK headers and libraries |
+| `HOST_TOOLS_PATH` | `$HOME/work/host-tools` | `riscv64-unknown-linux-musl` toolchain |
 
-## III. System Architecture
+`build.sh` copies the project into `$SSCMA_EXAMPLE_PATH/solutions/motion_detection` and writes the executable to its `build/` directory. `deploy.sh` uses SSH key authentication; run `ssh-copy-id root@192.168.42.1` first if needed. Use `--host root@<ip>` for another device, `--no-service` to copy without restarting, or `--uninstall` to remove the app and restart the stock `recamera-onvif` service. Deployment also installs the SDK `libcvi_rtsp.so` beside the executable.
 
-```text
-Camera Frame (VI)
-    ↓
-VPSS ──► VENC H.264 ──► rtsp_demo ──► RTSP :8554/live0 ──► NVR / Home Assistant
-   │
-   ├──► VENC JPEG ──► snapshot_store (ring buffer, 16 frames)
-   │                        ▲
-   └──► frame_sync ──► motion_detector (320x180 grey diff + ROI mask)
-                            │   motion_start / motion_end
-                            ├──► frame_sei   (metadata inside the H.264 stream)
-                            ├──► http_server (:8080 status / config / snapshot / events)
-                            └──► notifier ──► HTTP POST webhook ──► Home Assistant
+The installed service is `/etc/init.d/S96recamera-motion`. Check it with:
+
+```bash
+/etc/init.d/S96recamera-motion status
+tail -f /var/log/recamera-motion.log
 ```
 
----
+The camera pipeline has one owner. The service stops `recamera-onvif` and `sscma-node` before starting; use the service's `restart` command rather than force-killing the process.
 
-## IV. Module Description
+## Device-side code
 
----
+| File | Responsibility |
+| --- | --- |
+| `main/main.cpp` | Read startup settings and connect the detector, notifier, video stack, and HTTP server |
+| `main/video_stack.{hpp,cpp}` | Configure motion, JPEG, and optional H.264 channels; collect frames and manage RTSP startup |
+| `main/app_api.{hpp,cpp}` | Handle application API routes and persist configuration |
+| `main/event_payload.{hpp,cpp}` | Build webhook event JSON and encode optional JPEG data |
+| `main/motion_detector.{hpp,cpp}` | Background model, ROI masks, motion transitions, and recent event/frame history |
+| `main/motion_config.{hpp,cpp}` | Configuration defaults, validation, JSON parsing, and file storage |
+| `main/snapshot_store.hpp` | Bounded ring of encoded JPEG frames for live and event snapshots |
+| `main/http_server.{hpp,cpp}` | HTTP transport, request parsing, and CORS |
+| `main/notifier.{hpp,cpp}` | Asynchronous webhook queue, retries, and delivery statistics |
+| `main/rtsp_demo.{h,cpp}`, `frame_sync.*`, `frame_sei.*` | RTSP output and frame metadata support |
+| `main/mini_json.hpp` | Embedded JSON parser |
+| `main/default_motion_roi.json` | Example configuration; the runtime does not load it automatically |
 
-### 1 main.cpp
+Add new device-side `.cpp` files to `main/CMakeLists.txt` under `SRCS`.
 
-System start-up entry point:
+The motion channel uses an NV21 luma plane at 320×180 and 10 fps. Include polygons select pixels to inspect; exclude polygons remove pixels from that mask. The detector builds a running background model, filters noise, measures connected regions, and applies trigger/clear frame counts before emitting `motion_start` or `motion_end`. JPEG snapshots are buffered separately (1280×720 at 10 fps by default). When RTSP is enabled, the H.264 channel runs at 1920×1080 and 30 fps. The RTSP code contains frame synchronization and SEI support.
 
-* Loads the persisted configuration from `MOTION_CONFIG_PATH`
-* Brings up VI/VPSS and opens two encoder channels — H.264 1920x1080@30 for RTSP and
-  JPEG 1280x720@10 for snapshots
-* Starts the RTSP server (`:8554/live0`) and the HTTP server (`:8080`)
-* Feeds a downscaled Y plane into `motion_detector`
-* Publishes every encoded JPEG into `snapshot_store`
-* Routes detector events to the event ring and to `notifier`
+## Configuration
 
----
-
-### 2 motion_detector
-
-Core detection module. It works on a downscaled Y (luma) plane, 320x180 by default, and
-is pure integer arithmetic — no OpenCV, no NPU.
-
-Per frame:
-
-1. **ROI mask** — `include` polygons are rasterised into an active mask, `exclude`
-   polygons are subtracted from it. Masked-out pixels can never contribute.
-2. **Per-pixel background model** — `|current - background| >= pixel_threshold` marks a
-   foreground pixel. The background is a running average updated with
-   `background_alpha` on stable pixels and the much slower `foreground_alpha` on moving
-   ones, so a parked car stops triggering while a walking person keeps doing so.
-3. **3x3 majority filter** — a pixel survives only if at least 4 of its 9 neighbours are
-   foreground, which removes sensor noise.
-4. **Connected components** — a BFS flood fill yields the total motion pixel count, the
-   largest blob size and its bounding box.
-5. **Debounce** — `min_motion_pixels` / `min_blob_pixels` gate a single frame;
-   `trigger_frames` consecutive positive frames raise `motion_start`, `clear_frames`
-   consecutive negative frames raise `motion_end`.
-6. **Events** — every transition is appended to a ring buffer (served by `/api/events`)
-   and handed to the registered callback, which `notifier` turns into a webhook push.
-
-The first `warmup_frames` after start-up, and after `POST /api/background/reset`, only
-build the background model and never alert.
-
----
-
-### 3 roi_manager
-
-Responsible for polygon region management:
-
-* Supports multiple ROIs
-* Supports dynamic updates
-* Determines if a point is within a region
-
-```cpp
-cv::pointPolygonTest(polygon, point, false)
-```
-
----
-
-### 4 roi.h
-
-Defines the basic ROI structure:
-
-```cpp
-struct ROI {
-    int id;
-    std::vector<cv::Point> points;
-};
-```
-
----
-
-### 5 frame_sync
-
-Used to solve multi-source frame synchronization issues:
-
-* RTSP / camera frame alignment
-* Timestamp correction
-* Buffer queue management
-
----
-
-### 6 frame_sei
-
-Embeds detection results into the video stream:
-
-* Motion status
-* ROI hit information
-* Timestamp
-
-Used for:
-
-👉 NVR / AI device parsing of video auxiliary information
-
----
-
-### 7 rtsp_demo
-
-Responsible for video output:
-
-* H264/H265 encoded stream output
-* Pushing to RTSP server
-* Optional overlay of detection results
-
----
-
-### 8 http_server
-
-Threaded HTTP control interface on port 8080 (`MOTION_HTTP_PORT`).
-
-* Every connection is served on its own thread, so a slow client cannot block detection.
-* CORS headers are always sent, letting a browser page — including the Home Assistant
-  panel — call the device directly.
-* Routes accept both a JSON body and equivalent query parameters.
-
-Full route list: [V. HTTP API](#v-http-api).
-
----
-
-### 9 motion_config
-
-Manages runtime parameters:
-
-* Detection sensitivity (pixel threshold, minimum motion pixels, minimum blob size)
-* Debounce (trigger / clear / warm-up frame counts)
-* Background model update rates
-* ROI zones — `include` triggers, `exclude` is a whitelist
-* Webhook notify target
-
-Persisted as JSON at `MOTION_CONFIG_PATH` (default `/userdata/motion_roi.json`), so
-regions survive a reboot. Zone coordinates are **normalised 0–1**, which keeps them
-valid across resolutions.
+The app reads `MOTION_CONFIG_PATH` (default `/userdata/motion_roi.json`) at startup. If the file is absent or invalid, built-in defaults apply. `main/default_motion_roi.json` is an example, not an automatically loaded fallback. Motion and notification settings can be changed through the HTTP API; RTSP changes are saved but need a service restart.
 
 ```json
 {
   "version": 1,
   "enabled": true,
-  "pixel_threshold": 2,
-  "min_motion_pixels": 1,
-  "min_blob_pixels": 1,
-  "trigger_frames": 1,
-  "clear_frames": 3,
-  "warmup_frames": 3,
+  "pixel_threshold": 20,
+  "min_motion_pixels": 120,
+  "min_blob_pixels": 40,
+  "trigger_frames": 3,
+  "clear_frames": 5,
+  "warmup_frames": 20,
   "background_alpha": 0.04,
   "foreground_alpha": 0.002,
   "zones": [
     {
-      "id": "z1",
-      "name": "door",
+      "id": "door",
+      "name": "Door",
       "type": "include",
       "points": [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]]
     }
   ],
+  "rtsp": {"enabled": true, "port": 8554, "path": "/live0"},
   "notify": {
-    "enabled": true,
-    "url": "http://homeassistant.local:8123/api/webhook/recamera-<entry_id>",
+    "enabled": false,
+    "url": "",
     "device_name": "reCamera",
     "events": ["motion_start", "motion_end"],
     "include_image": true,
@@ -260,249 +91,52 @@ valid across resolutions.
 }
 ```
 
----
+Zone coordinates are normalized to 0–1. Each zone needs at least three points. An `include` zone is monitored; an `exclude` zone is ignored. The first `warmup_frames` frames after startup or background reset build the background model without alerting.
 
-### 10 mini_json
+The `rtsp` block defaults to enabled on port 8554 at `/live0`. Its path must be one slash-prefixed segment containing only ASCII letters, digits, `_`, or `-` (at most 63 characters after the slash). A configuration update returns `rtsp.restart_required` when the active listener differs from the saved settings. Set `rtsp.enabled` to `false` and restart to stop the encoder and listener.
 
-For embedded environments:
+Other startup variables are `MOTION_HTTP_PORT` (default 8080), `MOTION_DEVICE_IP` (override the advertised address), `MOTION_SNAPSHOT_WIDTH` (1280), `MOTION_SNAPSHOT_HEIGHT` (720), and `MOTION_SNAPSHOT_FPS` (10; set to 0 to disable snapshots).
 
-* No external dependencies
-* Parses ROI / config JSON
+This build has no MQTT client. `/api/health` reports `mqtt.supported: false`, and a configuration containing an `mqtt` block is rejected.
 
----
+## HTTP API
 
-### 11 default_motion_roi.json
+Default base URL: `http://<device-ip>:8080`. Responses are JSON except JPEG snapshots. The server sends CORS headers and handles `OPTIONS` requests.
 
-Default ROI configuration file
-
-Used for:
-
-* Initial region loading
-* Starting the system without a UI
-
----
-
-### 12 snapshot_store
-
-Header-only JPEG ring buffer (`main/snapshot_store.hpp`).
-
-* Keeps the last N encoded JPEG frames (1280x720, default 16) with capture timestamps.
-* Lets a client fetch the frame belonging to an event *after* the fact, so every alert
-  can carry the picture of the moment it fired.
-* Lookup by `event_id` or by an absolute millisecond timestamp.
-
----
-
-### 13 notifier
-
-Background webhook worker (`main/notifier.*`).
-
-* Serialises `motion_start` / `motion_end` / `test` events to JSON.
-* Attaches the matching JPEG from `snapshot_store` as base64 when `include_image` is on,
-  capped by `image_max_bytes`.
-* Runs on its own thread with a bounded queue, per-event timeout and retries, so a slow
-  or unreachable receiver can never stall detection or the video pipeline.
-* Exposes send statistics through `GET /api/notify`.
-
----
-
-## V. HTTP API
-
-Base URL `http://<device-ip>:8080`. All responses are JSON except `/api/snapshot.jpg`.
-Every route also answers `OPTIONS` with the right CORS headers.
-
-| Method | Path | Purpose |
+| Method | Route | Purpose |
 | --- | --- | --- |
-| GET | `/api/health` | Capability probe: snapshot channel size/fps, RTSP URL, notify state |
-| GET | `/api/version` | Program name, version, API schema level |
-| GET | `/api/status` | Live state: motion flag, pixel counts, bbox, warm-up, event id |
-| GET | `/api/config` | Current zones and sensitivity |
-| POST | `/api/config` | Replace zones and sensitivity, persisted to disk |
-| POST | `/api/background/reset` | Rebuild the background model (after moving the camera) |
-| GET | `/api/snapshot.jpg` | Current JPEG frame; `?event_id=N` or `?at=<unix_ms>` for a buffered one |
-| GET | `/api/events` | Event list; `?after_id=N&limit=M` for incremental polling |
-| GET | `/api/frames` | Per-frame diagnostic ring of the analysis buffer |
-| GET | `/api/notify` | Push target plus send statistics |
-| POST | `/api/notify` | Change the push target (the HA integration writes this automatically) |
-| POST | `/api/notify/test` | Push a `test` event immediately |
+| GET | `/api/health` | Reachability, active RTSP and snapshot state, notification state, MQTT capability |
+| GET | `/api/version` | Program and API versions |
+| GET | `/api/status` | Current detection state and latest measurements |
+| GET / POST | `/api/config` | Read or save motion, zone, notification, and RTSP settings |
+| POST | `/api/background/reset` | Rebuild the background model |
+| GET | `/api/snapshot.jpg` | Latest JPEG, or `?event_id=N` / `?at=<unix_ms>` from the buffer |
+| GET | `/api/events` | Event history; `?after_id=N&limit=M` for incremental reads |
+| GET | `/api/frames` | Recent analysis-frame diagnostics |
+| GET / POST | `/api/notify` | Read delivery statistics or update the webhook target |
+| POST | `/api/notify/test` | Queue a test notification |
 
-### Status
+A `POST /api/config` replaces unspecified motion fields with their defaults. When the `notify` or `rtsp` block is omitted, the existing block is preserved. Send the complete motion settings you intend to keep. A notification-only change can use `POST /api/notify`.
 
-```http
-GET /api/status
+The webhook posts JSON containing the event type, event ID, capture time, motion counts, normalized bounding box, snapshot URL, and (when enabled and available) a base64 JPEG. The notifier uses a bounded background queue so delivery does not block frame processing. Use `GET /api/notify` for send and failure counts.
+
+## Home Assistant and desktop editor
+
+Use the [Home Assistant integration](https://github.com/yyling0101-a11y/recamera-ha) to draw regions, show the RTSP view, receive webhook alerts, and browse snapshots. The device API above can also be used directly.
+
+The optional Windows editor uses PySide6. From `windows_ui/`:
+
+```powershell
+python -m pip install -r requirements.txt
+python app.py --rtsp rtsp://192.168.42.1:8554/live0 --api http://192.168.42.1:8080
 ```
 
-```json
-{
-  "motion": true,
-  "event_id": 4,
-  "frame_id": "20269",
-  "configured": true,
-  "enabled": true,
-  "warming_up": false,
-  "motion_pixels": 116,
-  "largest_blob_pixels": 85,
-  "motion_ratio": 0.0073,
-  "active_mask_pixels": 15840,
-  "analysis_width": 320,
-  "analysis_height": 180,
-  "bbox": [0.36, 0.58, 0.20, 0.31],
-  "capture_unix_ms": 1791796312080,
-  "last_motion_unix_ms": 1791796312140,
-  "last_error": ""
-}
-```
+You can also start it with `run_windows.bat` and change the addresses in the window. Connect RTSP, draw an Include polygon, optionally draw Exclude polygons over areas with recurring motion, then upload to the device. Left-click adds a vertex; right-click, Backspace, or Z removes the last vertex; Esc cancels the current polygon. The UI stores normalized coordinates.
 
-`bbox` is normalised `[x, y, w, h]`.
 
-### Regions
+## Home Assistant application bundle / HA 应用配置
 
-```http
-POST /api/config
-```
-
-```json
-{
-  "enabled": true,
-  "pixel_threshold": 2,
-  "zones": [
-    { "id": "z1", "name": "door", "type": "include",
-      "points": [[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]] },
-    { "id": "z2", "name": "fan", "type": "exclude",
-      "points": [[0.2, 0.2], [0.3, 0.2], [0.3, 0.3]] }
-  ]
-}
-```
-
-Omitted keys keep their current value. Coordinates are normalised 0–1.
-
-### Webhook push
-
-When `notify.enabled` is true the device POSTs each event to `notify.url`:
-
-```json
-{
-  "source": "recamera_motion_detection",
-  "schema": 2,
-  "event": "motion_start",
-  "event_id": 12,
-  "device_ip": "192.168.42.1",
-  "snapshot_url": "http://192.168.42.1:8080/api/snapshot.jpg?event_id=12",
-  "unix_ms": 1791796312140,
-  "capture_unix_ms": 1791796312080,
-  "frame_id": "20269",
-  "motion_pixels": 4297,
-  "largest_blob_pixels": 3344,
-  "motion_ratio": 0.1166,
-  "analysis_width": 320,
-  "analysis_height": 180,
-  "bbox": [0.606, 0.439, 0.294, 0.461],
-  "image": {
-    "encoding": "base64",
-    "content_type": "image/jpeg",
-    "width": 1280,
-    "height": 720,
-    "capture_unix_ms": 1791796312080,
-    "bytes": 42897,
-    "data": "<base64 jpeg>"
-  }
-}
-```
-
-`image` is omitted when `include_image` is false, the frame is no longer buffered, or
-the encoded JPEG exceeds `image_max_bytes`.
-
----
-
-## VI. Build and Deploy
-
-Cross compilation needs three trees; override them with environment variables if your
-layout differs:
-
-| Variable | Default | Provides |
-| --- | --- | --- |
-| `SSCMA_EXAMPLE_PATH` | `$HOME/work/sscma-example-sg200x` | `cmake/` and `components/` build glue |
-| `SG200X_SDK_PATH` | `$HOME/work/sdk_dl/sg2002_recamera_emmc` | `cvi_mpi`, `cvi_rtsp` headers and libs |
-| `HOST_TOOLS_PATH` | `$HOME/work/host-tools` | `riscv64-unknown-linux-musl` toolchain |
-
-```bash
-./scripts/build.sh        # cross compile -> <sscma>/solutions/motion_detection/build/motion_detection
-./scripts/deploy.sh       # install to /opt/recamera-motion and enable the boot service
-```
-
-`deploy.sh` options:
-
-```bash
-./scripts/deploy.sh --host root@192.168.4.5   # a different address
-./scripts/deploy.sh --no-service              # copy files without restarting
-./scripts/deploy.sh --uninstall               # remove everything, restart stock recamera-onvif
-```
-
-It uses SSH key authentication, so run `ssh-copy-id root@192.168.42.1` once.
-
-> `deploy.sh` also installs the plain SDK `libcvi_rtsp.so` into `/opt/recamera-motion/lib`
-> and the launcher puts that directory first in `LD_LIBRARY_PATH`. The firmware copy in
-> `/usr/local/lib/recamera-onvif` is a vendor variant that answers every RTSP `DESCRIBE`
-> with `401` Digest auth, which most clients (including Home Assistant) cannot handle.
-
----
-
-## VII. Running
-
-Installed as a boot service:
-
-```bash
-/etc/init.d/S96recamera-motion start|stop|restart|status
-tail -f /var/log/recamera-motion.log
-```
-
-The camera pipeline has a single owner, so the service stops `recamera-onvif` and
-`sscma-node` before starting. Never `kill -9` the process — a hard kill wedges the VPSS
-pipeline; use `restart`, or reboot the device.
-
-To run it by hand:
-
-```bash
-/opt/recamera-motion/recamera-motion          # sets LD_LIBRARY_PATH and defaults
-MOTION_HTTP_PORT=8080 MOTION_CONFIG_PATH=/userdata/motion_roi.json /opt/recamera-motion/recamera-motion
-```
-
-Verify:
-
-```bash
-curl http://192.168.42.1:8080/api/health
-curl http://192.168.42.1:8080/api/status
-ffprobe rtsp://192.168.42.1:8554/live0        # H.264 1920x1080@30
-```
-
----
-
-## VIII. Home Assistant
-
-Regions, live view, notifications and the snapshot archive are handled by the companion
-integration: [reCamera for Home Assistant](https://github.com/yyling0101-a11y/recamera-ha).
-It talks to this program over the HTTP API above and receives alerts through the webhook
-push, falling back to polling when the device cannot reach Home Assistant.
-
-The bundled `windows_ui` client keeps working against the same API.
-
----
-
-## IX. Data Flow
-
-```text
-VI sensor
-    ↓
-VPSS
-    ├──► VENC H.264 ──► rtsp_demo ──► RTSP :8554 ──► NVR / Home Assistant
-    └──► VENC JPEG ──► snapshot_store ──► /api/snapshot.jpg  &  webhook image
-    ↓
-frame_sync (timestamp / frame alignment)
-    ↓
-motion_detector (background model + ROI mask)
-    ↓
-motion_start / motion_end
-    ├──► frame_sei  (metadata embedded in the H.264 stream)
-    ├──► event ring (/api/events, /api/status)
-    └──► notifier   (HTTP POST webhook ──► Home Assistant)
-```
+`HA_config/recamera-app.json` declares the app metadata and supported connections.
+`HA_config/recamera-panel.js` provides the sandboxed app page in the reCamera
+Home Assistant integration. Keep both files in ZIP uploads; the device-side
+program and Solution `.deb` installation are separate.

@@ -15,6 +15,7 @@
 
 static APP_PARAM_RTSP_T g_rtsp;
 static CVI_BOOL g_mutexInitialized = CVI_FALSE;
+static char g_sessionPath[64] = "live0";
 
 static std::int64_t nowUnixMs() {
     using namespace std::chrono;
@@ -87,7 +88,7 @@ static int initializeSessionAttributes(void) {
             return CVI_FAILURE;
         }
 
-        snprintf(g_rtsp.SessionAttr[i].name, sizeof(g_rtsp.SessionAttr[i].name), "live%d", i);
+        snprintf(g_rtsp.SessionAttr[i].name, sizeof(g_rtsp.SessionAttr[i].name), "%s", g_sessionPath);
         g_rtsp.SessionAttr[i].reuseFirstSource = 1;
         g_rtsp.SessionAttr[i].video.play       = onPlay;
         g_rtsp.SessionAttr[i].video.playArg    = (void*)(intptr_t)channel;
@@ -319,8 +320,18 @@ int fpStreamingSendToRtsp(void* pData, void* pArgs, void* pUserData) {
     return result;
 }
 
-int initRtsp(uint8_t channelEnableMask) {
+int initRtsp(uint8_t channelEnableMask, int port, const char* path) {
     loadParameters();
+    if (port < 1 || port > 65535 || path == NULL || path[0] != '/') {
+        fprintf(stderr, "[rtsp] invalid listener settings\n");
+        return CVI_FAILURE;
+    }
+    if (strlen(path + 1) == 0 || strlen(path + 1) >= sizeof(g_sessionPath)) {
+        fprintf(stderr, "[rtsp] path must contain 1..%zu characters\n", sizeof(g_sessionPath) - 1);
+        return CVI_FAILURE;
+    }
+    g_rtsp.port = port;
+    snprintf(g_sessionPath, sizeof(g_sessionPath), "%s", path + 1);
     FrameSyncRegistry::instance().clear();
     int count = 0;
     for (int channel = 0; channel < MAX_RTSP_SESSION; ++channel) {
